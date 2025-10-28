@@ -11,10 +11,6 @@ from datetime import datetime
 import warnings
 import os
 import numpy as np # <-- THÊM DÒNG NÀY
-from dotenv import load_dotenv # <-- THÊM DÒNG NÀY
-
-# Load environment variables từ file .env
-load_dotenv() # <-- THÊM DÒNG NÀY
 
 warnings.filterwarnings('ignore')
 
