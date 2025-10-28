@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+pandas
+simple-salesforce
+openpyxl
+python-dotenv
