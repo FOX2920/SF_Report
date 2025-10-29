@@ -504,19 +504,6 @@ async def count_contract_details_by_account(
     except Exception as e:
         return {"success": False, "error": f"Error counting data for account {account_code}: {str(e)}"}
 
-
-# =================================================================
-# ĐÃ XÓA ENDPOINT: /api/contract-products/filter (POST)
-# =================================================================
-
-
-# =================================================================
-# ĐÃ XÓA ENDPOINT: /api/contract-products/count (POST)
-# =================================================================
-
-
-# =================================================================
-
 if __name__ == "__main__":
     import uvicorn
     # Bạn cần set các biến môi trường (environment variables)
