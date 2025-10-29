@@ -4,3 +4,4 @@ pandas
 simple-salesforce
 openpyxl
 python-dotenv
+mlxtend
