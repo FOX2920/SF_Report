@@ -123,7 +123,7 @@ class SalesforceExporter:
     def get_count_only(self, filters: Optional[List[FilterCondition]] = None):
         """
         Chỉ lấy tổng số record (totalSize) mà không dùng SELECT COUNT.
-        Cách làm: Chạy truy vấn thật nhưng với LIMIT 1 và dùng sf.query()
+        Cách làm: Chạy truy vấn thật nhưng với  và dùng sf.query()
         """
         
         # Sử dụng helper (helper này giờ đã bao gồm cả filter cứng)
@@ -131,15 +131,15 @@ class SalesforceExporter:
         
         try:
             # Xây dựng SOQL để lấy metadata
-            # Chúng ta chỉ cần 1 trường (ví dụ: Id) và LIMIT 1 để truy vấn thật nhanh
-            soql_for_count = f"SELECT Id FROM Contract_Product__c {where_statement} LIMIT 1"
+            # Chúng ta chỉ cần 1 trường (ví dụ: Id) và  để truy vấn thật nhanh
+            soql_for_count = f"SELECT Id FROM Contract_Product__c {where_statement} "
             
             # Quan trọng: Dùng self.sf.query() (KHÔNG PHẢI query_all())
             # self.sf.query() trả về batch đầu tiên CÙNG VỚI metadata
             count_result = self.sf.query(soql_for_count)  
             
             # 'totalSize' trong kết quả của sf.query() là tổng số record
-            # khớp với WHERE, BỎ QUA 'LIMIT 1'
+            # khớp với WHERE, BỎ QUA ''
             return count_result['totalSize']
             
         except Exception as e:
