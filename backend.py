@@ -1,7 +1,10 @@
 """
 FastAPI Backend - Trích xuất dữ liệu từ Salesforce
-Đã cập nhật để hỗ trợ Phân Trang Thông Minh (Smart Pagination) 
+Đã cập nhật để hỗ trợ Phân Trang Thông Minh (Smart Pagination)
 cho Custom GPT bằng cách trả về `total_records`.
+
+SỬA LỖI: Cập nhật _build_where_clause để dùng định dạng YYYY-MM-DD
+cho trường Created_Date__c (kiểu Date) thay vì DateTime.
 """
 
 from fastapi import FastAPI, Query, HTTPException, Body
@@ -45,21 +48,11 @@ class FilterCondition(BaseModel):
     """Định nghĩa một điều kiện lọc đơn lẻ"""
     field: str  # Tên trường SOQL, ví dụ: 'Segment__c' hoặc 'Product__r.Family'
     operator: Literal["=", "!=", ">", "<", ">=", "<=", "LIKE"] = "="
-    value: str | int | float | bool | None # Giá trị để soảng
-
-# Bỏ class FilterRequest vì không còn endpoint POST nào sử dụng nó
-# class FilterRequest(BaseModel):
-#     """
-#     Định nghĩa body cho request lọc.
-#     Sử dụng Body(...) thay vì Query(...) cho các tham số POST.
-#     """
-#     filters: List[FilterCondition] = []
-#     limit: int = Body(200, ge=1, le=500)
-#     offset: int = Body(0, ge=0)
+    value: str | int | float | bool | None # Giá trị để so sánh
 
 
 # =================================================================
-# CẬP NHẬT Lớp SalesforceExporter
+# Lớp SalesforceExporter
 # =================================================================
 
 class SalesforceExporter:
@@ -84,18 +77,19 @@ class SalesforceExporter:
             raise HTTPException(status_code=503, detail=f"Lỗi kết nối Salesforce: {e}")
 
     # =================================================================
-    # CẬP NHẬT: Helper Function để thêm các bộ lọc cứng
+    # SỬA LỖI: Helper Function để thêm các bộ lọc cứng
     # =================================================================
     def _build_where_clause(self, filters: Optional[List[FilterCondition]] = None) -> str:
         """Xây dựng mệnh đề WHERE từ danh sách filter VÀ các filter cứng"""
         
         # Các bộ lọc cứng (logic nghiệp vụ)
-        # Chuyển logic từ transform_data vào đây
         current_year = datetime.now().year
         hardcoded_filters = [
             "Contract__r.Account__r.Account_Code__c != NULL",
-            f"Contract__r.Created_Date__c >= 2015-01-01T00:00:00Z",
-            f"Contract__r.Created_Date__c <= {current_year}-12-31T23:59:59Z"
+            
+            # ĐÃ SỬA: Dùng định dạng 'YYYY-MM-DD' cho trường kiểu Date
+            f"Contract__r.Created_Date__c >= 2015-01-01", 
+            f"Contract__r.Created_Date__c <= {current_year}-12-31"
         ]
         
         where_clauses = hardcoded_filters
@@ -124,7 +118,7 @@ class SalesforceExporter:
         
 
     # =================================================================
-    # SỬA: Hàm chỉ để đếm (KHÔNG DÙNG SELECT COUNT)
+    # Hàm chỉ để đếm (KHÔNG DÙNG SELECT COUNT)
     # =================================================================
     def get_count_only(self, filters: Optional[List[FilterCondition]] = None):
         """
@@ -142,7 +136,7 @@ class SalesforceExporter:
             
             # Quan trọng: Dùng self.sf.query() (KHÔNG PHẢI query_all())
             # self.sf.query() trả về batch đầu tiên CÙNG VỚI metadata
-            count_result = self.sf.query(soql_for_count) 
+            count_result = self.sf.query(soql_for_count)  
             
             # 'totalSize' trong kết quả của sf.query() là tổng số record
             # khớp với WHERE, BỎ QUA 'LIMIT 1'
@@ -152,7 +146,7 @@ class SalesforceExporter:
             raise Exception(f"Lỗi khi đếm record (query for totalSize): {e}")
 
     # =================================================================
-    # CẬP NHẬT: 'fetch_data' giờ dùng _build_where_clause
+    # 'fetch_data' dùng _build_where_clause
     # =================================================================
     def fetch_data(self, limit: int = 200, offset: int = 0, filters: Optional[List[FilterCondition]] = None):
         """
@@ -234,7 +228,7 @@ class SalesforceExporter:
             # Ném lỗi để endpoint có thể xử lý
             raise Exception(f"Lỗi khi lấy dữ liệu (SOQL có thể sai): {e}")
     
-    # CẬP NHẬT: transform_data (Bỏ các bộ lọc dư thừa)
+    # transform_data (Bỏ các bộ lọc dư thừa)
     def transform_data(self, df):
         """Chuyển đổi dữ liệu (Giữ nguyên)"""
         df_export = pd.DataFrame()
@@ -269,12 +263,7 @@ class SalesforceExporter:
         df_export['Contract Name'] = df['Contract_Name']
         df_export['Created Date (C)'] = df['Created_Date'].dt.strftime('%d/%m/%Y')
         
-        # XÓA CÁC BỘ LỌC NÀY (vì đã chuyển vào SOQL)
-        # df_export = df_export[
-        #     (df_export['YEAR'] >= 2015) & 
-        #     (df_export['YEAR'] <= datetime.now().year)
-        # ]
-        # df_export = df_export.dropna(subset=['Account Name: Account Code'])
+        # Các bộ lọc bằng pandas đã được chuyển vào SOQL (trong _build_where_clause)
         
         df_export = df_export.sort_values(
             by=['Account Name: Account Code', 'YEAR'],
@@ -287,7 +276,7 @@ class SalesforceExporter:
 
 
 # =================================================================
-# CẬP NHẬT CÁC ENDPOINTS
+# CÁC ENDPOINTS
 # =================================================================
 
 @app.get("/")
@@ -305,7 +294,7 @@ async def root():
     }
 
 
-# CẬP NHẬT: Endpoint này giờ trả về metadata
+# Endpoint này giờ trả về metadata
 @app.get("/api/contract-products")
 async def get_all_contract_product_details(
     limit: int = Query(200, ge=1, le=500),
@@ -332,7 +321,7 @@ async def get_all_contract_product_details(
         if df_raw is None or len(df_raw) == 0:
             return {
                 "success": True,
-                "metadata": metadata, 
+                "metadata": metadata,  
                 "data": [],
                 "message": "No contract products found for this page"
             }
@@ -342,7 +331,7 @@ async def get_all_contract_product_details(
         if df_export is None or len(df_export) == 0:
             return {
                 "success": True,
-                "metadata": metadata, 
+                "metadata": metadata,  
                 "data": [],
                 "message": "No contract products found after transformation for this page"
             }
@@ -350,11 +339,11 @@ async def get_all_contract_product_details(
         df_json = df_export.replace({np.nan: None})
         records = df_json.to_dict(orient='records')
         
-        metadata["returned_records"] = len(records) 
+        metadata["returned_records"] = len(records)  
         
         return {
             "success": True,
-            "metadata": metadata, 
+            "metadata": metadata,  
             "data": records
         }
         
@@ -364,7 +353,7 @@ async def get_all_contract_product_details(
         return {"success": False, "error": f"Error processing data: {str(e)}"}
 
 
-# CẬP NHẬT: Endpoint này giờ trả về metadata
+# Endpoint này giờ trả về metadata
 @app.get("/api/contract-products/by-account")
 async def get_contract_details_by_account(
     account_code: str = Query(..., description="Account code to filter by"),
@@ -393,9 +382,9 @@ async def get_contract_details_by_account(
         
         # Hàm fetch_data sẽ tự động kết hợp account_filter với các filter cứng
         df_raw, total_records = exporter.fetch_data(
-            limit=limit, 
-            offset=offset, 
-            filters=account_filter 
+            limit=limit,  
+            offset=offset,  
+            filters=account_filter  
         )
         
         metadata = {
@@ -426,7 +415,7 @@ async def get_contract_details_by_account(
         df_json = df_export.replace({np.nan: None})
         records = df_json.to_dict(orient='records')
         
-        metadata["returned_records"] = len(records) 
+        metadata["returned_records"] = len(records)  
         
         return {
             "success": True,
@@ -515,4 +504,3 @@ if __name__ == "__main__":
     # os.environ['SALESFORCE_SECURITY_TOKEN'] = 'your_token'
     
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
