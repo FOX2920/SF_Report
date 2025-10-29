@@ -1,8 +1,9 @@
 """
 FastAPI Backend - Trích xuất dữ liệu từ Salesforce
+Đã cập nhật để hỗ trợ Phân Trang (Pagination)
 """
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 from simple_salesforce import Salesforce
@@ -51,11 +52,28 @@ class SalesforceExporter:
             )
             return True
         except Exception as e:
-            raise Exception(f"Lỗi kết nối Salesforce: {e}")
+            # Ném lỗi cụ thể hơn để FastAPI có thể bắt
+            raise HTTPException(status_code=503, detail=f"Lỗi kết nối Salesforce: {e}")
     
-    def fetch_data(self):
-        """Lấy dữ liệu từ Salesforce"""
-        soql = """
+    # THAY ĐỔI: Thêm limit, offset, và account_code làm tham số
+    def fetch_data(self, limit: int = 100, offset: int = 0, account_code: str = None):
+        """Lấy dữ liệu từ Salesforce với phân trang và bộ lọc"""
+        
+        # Xây dựng mệnh đề WHERE một cách an toàn
+        where_clauses = []
+        if account_code:
+            # Bảo mật: Chuẩn hóa và thoát ký tự đặc biệt để tránh SOQL Injection
+            sanitized_code = account_code.strip().replace("'", "\\'")
+            if sanitized_code: # Đảm bảo không phải là chuỗi rỗng
+                where_clauses.append(f"Contract__r.Account__r.Account_Code__c = '{sanitized_code}'")
+
+        # Ghép các mệnh đề WHERE (nếu có)
+        where_statement = ""
+        if where_clauses:
+            where_statement = "WHERE " + " AND ".join(where_clauses)
+
+        # Xây dựng truy vấn SOQL động
+        soql = f"""
          SELECT Name, 
            Contract__r.Account__r.Account_Code__c, 
            Product__r.STONE_Color_Type__c,
@@ -78,7 +96,10 @@ class SalesforceExporter:
            Charge_Unit_PI__c,
            Total_Price_USD__c
          FROM Contract_Product__c 
+         {where_statement}
          ORDER BY Contract__r.Created_Date__c DESC
+         LIMIT {limit}
+         OFFSET {offset}
          """
         
         try:
@@ -98,10 +119,11 @@ class SalesforceExporter:
             return df
             
         except Exception as e:
+            # Ném lỗi để endpoint có thể xử lý
             raise Exception(f"Lỗi khi lấy dữ liệu: {e}")
     
     def transform_data(self, df):
-        """Chuyển đổi dữ liệu"""
+        """Chuyển đổi dữ liệu (Không thay đổi)"""
         df_export = pd.DataFrame()
         
         df_export['Account Name: Account Code'] = df['Contract_Account_Account_Code__c']
@@ -156,37 +178,36 @@ async def root():
     """Health check"""
     return {
         "status": "ok",
-        "message": "Salesforce Contract Products API",
+        "message": "Salesforce Contract Products API (Hỗ trợ phân trang)",
         "endpoints": {
-            "all_products": "/api/contract-products",
-            "by_account": "/api/contract-products/by-account?account_code=XXX"
+            "all_products": "/api/contract-products?limit=100&offset=0",
+            "by_account": "/api/contract-products/by-account?account_code=XXX&limit=100&offset=0"
         }
     }
 
 
+# THAY ĐỔI: Thêm tham số 'limit' và 'offset'
 @app.get("/api/contract-products")
-async def get_all_contract_product_details():
+async def get_all_contract_product_details(
+    limit: int = Query(100, ge=1, le=500), # Giới hạn 100, tối đa 500
+    offset: int = Query(0, ge=0)
+):
     """
-    Lấy toàn bộ dữ liệu chi tiết sản phẩm hợp đồng đã được xử lý.
-    Fetch, transform, and return all contract product details as JSON.
-    
-    Returns:
-        JSON với format: {"success": bool, "count": int, "data": list, "message": str (optional)}
+    Lấy dữ liệu chi tiết sản phẩm hợp đồng đã được xử lý (THEO TRANG).
     """
     try:
-        # Khởi tạo và kết nối
         exporter = SalesforceExporter(**SALESFORCE_CONFIG)
         exporter.connect()
         
-        # Lấy và xử lý dữ liệu
-        df_raw = exporter.fetch_data()
+        # THAY ĐỔI: Truyền limit và offset vào
+        df_raw = exporter.fetch_data(limit=limit, offset=offset)
         
         if df_raw is None or len(df_raw) == 0:
             return {
                 "success": True,
-                "count": 0,
+                "count": 0, "limit": limit, "offset": offset,
                 "data": [],
-                "message": "No contract products found"
+                "message": "No contract products found for this page"
             }
         
         df_export = exporter.transform_data(df_raw)
@@ -194,63 +215,60 @@ async def get_all_contract_product_details():
         if df_export is None or len(df_export) == 0:
             return {
                 "success": True,
-                "count": 0,
+                "count": 0, "limit": limit, "offset": offset,
                 "data": [],
-                "message": "No contract products found after transformation"
+                "message": "No contract products found after transformation for this page"
             }
         
-        # Thay thế NaN bằng None để tương thích JSON
         df_json = df_export.replace({np.nan: None})
         records = df_json.to_dict(orient='records')
         
         return {
             "success": True,
             "count": len(records),
+            "limit": limit,
+            "offset": offset,
             "data": records
         }
         
+    except HTTPException as http_e:
+        # Bắt lỗi từ hàm connect
+        return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
     except Exception as e:
-        return {
-            "success": False,
-            "error": f"Error processing data: {str(e)}"
-        }
+        return {"success": False, "error": f"Error processing data: {str(e)}"}
 
 
+# THAY ĐỔI: Thêm tham số 'limit' và 'offset'
 @app.get("/api/contract-products/by-account")
 async def get_contract_details_by_account(
-    account_code: str = Query(..., description="Account code to filter by (case-insensitive)")
+    account_code: str = Query(..., description="Account code to filter by (case-insensitive)"),
+    limit: int = Query(100, ge=1, le=500), # Giới hạn 100, tối đa 500
+    offset: int = Query(0, ge=0)
 ):
     """
-    Lấy dữ liệu chi tiết sản phẩm hợp đồng đã xử lý, lọc theo Account Code.
-    Fetch processed contract product details, filtered by a specific Account Code.
-    
-    Args:
-        account_code: Account code để lọc (không phân biệt chữ hoa/thường)
-        
-    Returns:
-        JSON với format: {"success": bool, "count": int, "data": list, "account_code": str, "message": str (optional)}
+    Lấy dữ liệu chi tiết sản phẩm hợp đồng (THEO TRANG), lọc theo Account Code.
     """
     try:
-        # Validate input
         if not account_code or not account_code.strip():
-            return {
-                "success": False,
-                "error": "Account code cannot be empty"
-            }
+            return {"success": False, "error": "Account code cannot be empty"}
         
-        # Khởi tạo và kết nối
         exporter = SalesforceExporter(**SALESFORCE_CONFIG)
         exporter.connect()
         
-        # Lấy và xử lý dữ liệu
-        df_raw = exporter.fetch_data()
+        # THAY ĐỔI: Truyền account_code, limit, offset vào fetch_data
+        # Bộ lọc giờ được thực hiện ở cấp độ SOQL
+        df_raw = exporter.fetch_data(
+            limit=limit, 
+            offset=offset, 
+            account_code=account_code
+        )
         
         if df_raw is None or len(df_raw) == 0:
             return {
                 "success": True,
-                "count": 0,
-                "data": [],
-                "message": f"No data found (empty source) for account code {account_code}"
+                "count": 0, "limit": limit, "offset": offset,
+                "data": [], "account_code": account_code,
+                "message": f"No data found for account code '{account_code}' on this page"
             }
         
         df_export = exporter.transform_data(df_raw)
@@ -258,41 +276,32 @@ async def get_contract_details_by_account(
         if df_export is None or len(df_export) == 0:
             return {
                 "success": True,
-                "count": 0,
-                "data": [],
-                "message": f"No data found (empty after transformation) for account code {account_code}"
+                "count": 0, "limit": limit, "offset": offset,
+                "data": [], "account_code": account_code,
+                "message": f"No data found (after transform) for account code '{account_code}' on this page"
             }
         
-        # Lọc DataFrame (so sánh không phân biệt chữ hoa/thường và khoảng trắng)
-        account_code_clean = account_code.strip().lower()
-        filtered_df = df_export[
-            df_export['Account Name: Account Code'].astype(str).str.strip().str.lower() == account_code_clean
-        ]
+        # XÓA BỎ: Không cần lọc bằng pandas nữa
+        # account_code_clean = account_code.strip().lower()
+        # filtered_df = df_export[...]
         
-        if filtered_df.empty:
-            return {
-                "success": True,
-                "count": 0,
-                "data": [],
-                "message": f"No data found for account code '{account_code}'"
-            }
-        
-        # Thay thế NaN bằng None để tương thích JSON
-        df_json = filtered_df.replace({np.nan: None})
+        df_json = df_export.replace({np.nan: None}) # Dùng df_export trực tiếp
         records = df_json.to_dict(orient='records')
         
         return {
             "success": True,
             "count": len(records),
+            "limit": limit,
+            "offset": offset,
             "data": records,
             "account_code": account_code
         }
-        
+
+    except HTTPException as http_e:
+        # Bắt lỗi từ hàm connect
+        return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
     except Exception as e:
-        return {
-            "success": False,
-            "error": f"Error processing data for account {account_code}: {str(e)}"
-        }
+        return {"success": False, "error": f"Error processing data for account {account_code}: {str(e)}"}
 
 
 if __name__ == "__main__":
