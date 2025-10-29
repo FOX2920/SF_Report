@@ -1,22 +1,21 @@
 """
-FastAPI Backend - Trích xuất dữ liệu từ Salesforce và xuất Excel
+FastAPI Backend - Trích xuất dữ liệu từ Salesforce
 """
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 from simple_salesforce import Salesforce
 from datetime import datetime
 import warnings
 import os
-import numpy as np # <-- THÊM DÒNG NÀY
+import numpy as np
 
 warnings.filterwarnings('ignore')
 
-app = FastAPI(title="Salesforce Data Exporter")
+app = FastAPI(title="Salesforce Contract Products API")
 
-# CORS middleware để cho phép React kết nối
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -147,26 +146,9 @@ class SalesforceExporter:
             ascending=[True, False]
         )
         
+        df_export = df_export.reset_index(drop=True)
+        
         return df_export
-    
-    def export_to_excel(self, df, output_file):
-        """Xuất dữ liệu ra Excel"""
-        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-            df.to_excel(
-                writer,
-                sheet_name='Chi tết sản phẩm theo KH',
-                index=False
-            )
-            
-            worksheet = writer.sheets['Chi tết sản phẩm theo KH']
-            
-            for idx, col in enumerate(df.columns, 1):
-                max_length = max(
-                    df[col].astype(str).apply(len).max(),
-                    len(str(col))
-                ) + 2
-                max_length = min(max_length, 50)
-                worksheet.column_dimensions[chr(64 + idx)].width = max_length
 
 
 @app.get("/")
@@ -174,106 +156,143 @@ async def root():
     """Health check"""
     return {
         "status": "ok",
-        "message": "Salesforce Data Exporter API"
+        "message": "Salesforce Contract Products API",
+        "endpoints": {
+            "all_products": "/api/contract-products",
+            "by_account": "/api/contract-products/by-account?account_code=XXX"
+        }
     }
 
 
-@app.get("/api/export")
-async def export_data():
+@app.get("/api/contract-products")
+async def get_all_contract_product_details():
     """
-    API endpoint để export dữ liệu từ Salesforce
+    Lấy toàn bộ dữ liệu chi tiết sản phẩm hợp đồng đã được xử lý.
+    Fetch, transform, and return all contract product details as JSON.
+    
+    Returns:
+        JSON với format: {"success": bool, "count": int, "data": list, "message": str (optional)}
     """
     try:
-        # Khởi tạo exporter
+        # Khởi tạo và kết nối
         exporter = SalesforceExporter(**SALESFORCE_CONFIG)
-        
-        # Kết nối
         exporter.connect()
         
-        # Lấy dữ liệu
+        # Lấy và xử lý dữ liệu
         df_raw = exporter.fetch_data()
+        
         if df_raw is None or len(df_raw) == 0:
-            raise HTTPException(status_code=404, detail="Không có dữ liệu")
+            return {
+                "success": True,
+                "count": 0,
+                "data": [],
+                "message": "No contract products found"
+            }
         
-        # Chuyển đổi
         df_export = exporter.transform_data(df_raw)
+        
         if df_export is None or len(df_export) == 0:
-            raise HTTPException(status_code=500, detail="Lỗi chuyển đổi dữ liệu")
+            return {
+                "success": True,
+                "count": 0,
+                "data": [],
+                "message": "No contract products found after transformation"
+            }
         
-        # Xuất Excel
-        output_file = 'Chi_tiet_san_pham_KH_Active.xlsx'
-        exporter.export_to_excel(df_export, output_file)
-        
-        # Trả về file
-        return FileResponse(
-            path=output_file,
-            filename=output_file,
-            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/stats")
-async def get_stats():
-    """
-    API endpoint để lấy thống kê dữ liệu
-    """
-    try:
-        exporter = SalesforceExporter(**SALESFORCE_CONFIG)
-        exporter.connect()
-        
-        df_raw = exporter.fetch_data()
-        if df_raw is None:
-            return {"total_records": 0}
-        
-        df_export = exporter.transform_data(df_raw)
+        # Thay thế NaN bằng None để tương thích JSON
+        df_json = df_export.replace({np.nan: None})
+        records = df_json.to_dict(orient='records')
         
         return {
-            "total_records": len(df_export),
-            "total_customers": int(df_export['Account Name: Account Code'].nunique()),
-            "year_range": f"{int(df_export['YEAR'].min())} - {int(df_export['YEAR'].max())}",
-            "last_updated": datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+            "success": True,
+            "count": len(records),
+            "data": records
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "success": False,
+            "error": f"Error processing data: {str(e)}"
+        }
 
 
-# --- API MỚI ĐƯỢC THÊM VÀO ---
-@app.get("/api/data")
-async def get_data_as_json():
+@app.get("/api/contract-products/by-account")
+async def get_contract_details_by_account(
+    account_code: str = Query(..., description="Account code to filter by (case-insensitive)")
+):
     """
-    API endpoint để lấy dữ liệu df_export dưới dạng JSON
+    Lấy dữ liệu chi tiết sản phẩm hợp đồng đã xử lý, lọc theo Account Code.
+    Fetch processed contract product details, filtered by a specific Account Code.
+    
+    Args:
+        account_code: Account code để lọc (không phân biệt chữ hoa/thường)
+        
+    Returns:
+        JSON với format: {"success": bool, "count": int, "data": list, "account_code": str, "message": str (optional)}
     """
     try:
+        # Validate input
+        if not account_code or not account_code.strip():
+            return {
+                "success": False,
+                "error": "Account code cannot be empty"
+            }
+        
+        # Khởi tạo và kết nối
         exporter = SalesforceExporter(**SALESFORCE_CONFIG)
         exporter.connect()
         
+        # Lấy và xử lý dữ liệu
         df_raw = exporter.fetch_data()
-        if df_raw is None:
-             raise HTTPException(status_code=404, detail="Không có dữ liệu")
+        
+        if df_raw is None or len(df_raw) == 0:
+            return {
+                "success": True,
+                "count": 0,
+                "data": [],
+                "message": f"No data found (empty source) for account code {account_code}"
+            }
         
         df_export = exporter.transform_data(df_raw)
+        
         if df_export is None or len(df_export) == 0:
-             raise HTTPException(status_code=500, detail="Lỗi chuyển đổi dữ liệu")
+            return {
+                "success": True,
+                "count": 0,
+                "data": [],
+                "message": f"No data found (empty after transformation) for account code {account_code}"
+            }
         
-        # Thay thế NaN (không hợp lệ trong JSON) bằng None (null trong JSON)
-        # df_export_json = df_export.where(pd.notnull(df_export), None) # <-- CÁCH CŨ
+        # Lọc DataFrame (so sánh không phân biệt chữ hoa/thường và khoảng trắng)
+        account_code_clean = account_code.strip().lower()
+        filtered_df = df_export[
+            df_export['Account Name: Account Code'].astype(str).str.strip().str.lower() == account_code_clean
+        ]
         
-        # FIX: Thay thế NaN (từ float, int, object, v.v.) bằng None (null)
-        # .replace() đáng tin cậy hơn .where() cho mục đích này
-        df_export_json = df_export.replace({np.nan: None})
+        if filtered_df.empty:
+            return {
+                "success": True,
+                "count": 0,
+                "data": [],
+                "message": f"No data found for account code '{account_code}'"
+            }
         
-        # Chuyển đổi DataFrame sang JSON định dạng 'records' (list of dicts)
-        data_json = df_export_json.to_dict(orient='records')
+        # Thay thế NaN bằng None để tương thích JSON
+        df_json = filtered_df.replace({np.nan: None})
+        records = df_json.to_dict(orient='records')
         
-        return data_json
+        return {
+            "success": True,
+            "count": len(records),
+            "data": records,
+            "account_code": account_code
+        }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-# --- KẾT THÚC API MỚI ---
+        return {
+            "success": False,
+            "error": f"Error processing data for account {account_code}: {str(e)}"
+        }
 
 
 if __name__ == "__main__":
