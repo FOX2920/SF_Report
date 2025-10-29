@@ -124,30 +124,32 @@ class SalesforceExporter:
         
 
     # =================================================================
-    # SỬA: Hàm chỉ để đếm (SỬA LỖI TRẢ VỀ 1)
+    # SỬA: Hàm chỉ để đếm (KHÔNG DÙNG SELECT COUNT)
     # =================================================================
     def get_count_only(self, filters: Optional[List[FilterCondition]] = None):
-        """Chỉ chạy truy vấn COUNT() dựa trên bộ lọc."""
+        """
+        Chỉ lấy tổng số record (totalSize) mà không dùng SELECT COUNT.
+        Cách làm: Chạy truy vấn thật nhưng với LIMIT 1 và dùng sf.query()
+        """
         
         # Sử dụng helper (helper này giờ đã bao gồm cả filter cứng)
         where_statement = self._build_where_clause(filters)
         
         try:
-            # Dùng COUNT(Id) nhanh hơn COUNT()
-            count_soql = f"SELECT COUNT(Id) FROM Contract_Product__c {where_statement}"
-            # Dùng .query() cho các truy vấn tổng hợp (aggregate)
-            count_result = self.sf.query(count_soql) 
+            # Xây dựng SOQL để lấy metadata
+            # Chúng ta chỉ cần 1 trường (ví dụ: Id) và LIMIT 1 để truy vấn thật nhanh
+            soql_for_count = f"SELECT Id FROM Contract_Product__c {where_statement} LIMIT 1"
             
-            # SỬA: Đối với COUNT(), 'totalSize' là 1 (vì có 1 dòng AggregateResult).
-            # Giá trị đếm thực sự nằm trong 'records[0]['expr0']'.
-            if count_result['totalSize'] > 0 and 'records' in count_result and len(count_result['records']) > 0:
-                return count_result['records'][0]['expr0']
+            # Quan trọng: Dùng self.sf.query() (KHÔNG PHẢI query_all())
+            # self.sf.query() trả về batch đầu tiên CÙNG VỚI metadata
+            count_result = self.sf.query(soql_for_count) 
             
-            # Nếu không có kết quả (ví dụ: bảng trống)
-            return 0
+            # 'totalSize' trong kết quả của sf.query() là tổng số record
+            # khớp với WHERE, BỎ QUA 'LIMIT 1'
+            return count_result['totalSize']
             
         except Exception as e:
-            raise Exception(f"Lỗi khi đếm record (COUNT query): {e}")
+            raise Exception(f"Lỗi khi đếm record (query for totalSize): {e}")
 
     # =================================================================
     # CẬP NHẬT: 'fetch_data' giờ dùng _build_where_clause
@@ -162,11 +164,11 @@ class SalesforceExporter:
         where_statement = self._build_where_clause(filters)
 
         # ================================================
-        # BƯỚC 1: Truy vấn COUNT()
+        # BƯỚC 1: Truy vấn COUNT() (đã được sửa)
         # ================================================
         total_records = 0
         try:
-            # Gọi hàm count đã có sẵn trong class (giờ đã được sửa)
+            # Gọi hàm count đã có sẵn trong class (giờ không dùng COUNT)
             # Truyền filters động vào
             total_records = self.get_count_only(filters)
             
@@ -210,6 +212,7 @@ class SalesforceExporter:
           """
         
         try:
+            # Dùng query_all() để lấy toàn bộ dữ liệu (đã giới hạn bởi LIMIT/OFFSET)
             query_result = self.sf.query_all(soql)
             records = query_result['records']
             
@@ -525,3 +528,4 @@ if __name__ == "__main__":
     # os.environ['SALESFORCE_SECURITY_TOKEN'] = 'your_token'
     
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
