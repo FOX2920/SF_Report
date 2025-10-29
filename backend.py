@@ -45,7 +45,7 @@ class FilterCondition(BaseModel):
     """Định nghĩa một điều kiện lọc đơn lẻ"""
     field: str  # Tên trường SOQL, ví dụ: 'Segment__c' hoặc 'Product__r.Family'
     operator: Literal["=", "!=", ">", "<", ">=", "<=", "LIKE"] = "="
-    value: str | int | float | bool | None # Giá trị để so sánh
+    value: str | int | float | bool | None # Giá trị để soảng
 
 # Bỏ class FilterRequest vì không còn endpoint POST nào sử dụng nó
 # class FilterRequest(BaseModel):
@@ -54,7 +54,7 @@ class FilterCondition(BaseModel):
 #     Sử dụng Body(...) thay vì Query(...) cho các tham số POST.
 #     """
 #     filters: List[FilterCondition] = []
-#     limit: int = Body(100, ge=1, le=500)
+#     limit: int = Body(200, ge=1, le=500)
 #     offset: int = Body(0, ge=0)
 
 
@@ -84,12 +84,23 @@ class SalesforceExporter:
             raise HTTPException(status_code=503, detail=f"Lỗi kết nối Salesforce: {e}")
 
     # =================================================================
-    # MỚI: Helper Function để tránh lặp code xây dựng WHERE
+    # CẬP NHẬT: Helper Function để thêm các bộ lọc cứng
     # =================================================================
     def _build_where_clause(self, filters: Optional[List[FilterCondition]] = None) -> str:
-        """Xây dựng mệnh đề WHERE từ danh sách filter. Trả về string (có thể rỗng)"""
-        where_clauses = []
+        """Xây dựng mệnh đề WHERE từ danh sách filter VÀ các filter cứng"""
         
+        # Các bộ lọc cứng (logic nghiệp vụ)
+        # Chuyển logic từ transform_data vào đây
+        current_year = datetime.now().year
+        hardcoded_filters = [
+            "Contract__r.Account__r.Account_Code__c != NULL",
+            f"Contract__r.Created_Date__c >= 2015-01-01T00:00:00Z",
+            f"Contract__r.Created_Date__c <= {current_year}-12-31T23:59:59Z"
+        ]
+        
+        where_clauses = hardcoded_filters
+        
+        # Thêm các bộ lọc động (nếu có)
         if filters:
             for f in filters:
                 if f.operator not in ["=", "!=", ">", "<", ">=", "<=", "LIKE"]:
@@ -108,18 +119,17 @@ class SalesforceExporter:
                 if sanitized_value:
                     where_clauses.append(f"{f.field} {f.operator} {sanitized_value}")
 
-        if where_clauses:
-            return "WHERE " + " AND ".join(where_clauses)
+        # Luôn có 'WHERE' vì đã có filter cứng
+        return "WHERE " + " AND ".join(where_clauses)
         
-        return "" # Trả về rỗng nếu không có filter
 
     # =================================================================
-    # MỚI: Hàm chỉ để đếm
+    # SỬA: Hàm chỉ để đếm (SỬA LỖI TRẢ VỀ 1)
     # =================================================================
     def get_count_only(self, filters: Optional[List[FilterCondition]] = None):
         """Chỉ chạy truy vấn COUNT() dựa trên bộ lọc."""
         
-        # Sử dụng helper
+        # Sử dụng helper (helper này giờ đã bao gồm cả filter cứng)
         where_statement = self._build_where_clause(filters)
         
         try:
@@ -127,20 +137,28 @@ class SalesforceExporter:
             count_soql = f"SELECT COUNT(Id) FROM Contract_Product__c {where_statement}"
             # Dùng .query() cho các truy vấn tổng hợp (aggregate)
             count_result = self.sf.query(count_soql) 
-            return count_result['totalSize']
+            
+            # SỬA: Đối với COUNT(), 'totalSize' là 1 (vì có 1 dòng AggregateResult).
+            # Giá trị đếm thực sự nằm trong 'records[0]['expr0']'.
+            if count_result['totalSize'] > 0 and 'records' in count_result and len(count_result['records']) > 0:
+                return count_result['records'][0]['expr0']
+            
+            # Nếu không có kết quả (ví dụ: bảng trống)
+            return 0
+            
         except Exception as e:
             raise Exception(f"Lỗi khi đếm record (COUNT query): {e}")
 
     # =================================================================
     # CẬP NHẬT: 'fetch_data' giờ dùng _build_where_clause
     # =================================================================
-    def fetch_data(self, limit: int = 100, offset: int = 0, filters: Optional[List[FilterCondition]] = None):
+    def fetch_data(self, limit: int = 200, offset: int = 0, filters: Optional[List[FilterCondition]] = None):
         """
         Lấy dữ liệu từ Salesforce VÀ ĐẾM tổng số record.
         Trả về: (DataFrame, total_records)
         """
         
-        # Dùng helper mới
+        # Dùng helper mới (đã bao gồm filter cứng)
         where_statement = self._build_where_clause(filters)
 
         # ================================================
@@ -148,7 +166,8 @@ class SalesforceExporter:
         # ================================================
         total_records = 0
         try:
-            # Gọi hàm count đã có sẵn trong class
+            # Gọi hàm count đã có sẵn trong class (giờ đã được sửa)
+            # Truyền filters động vào
             total_records = self.get_count_only(filters)
             
             # Nếu không có record nào, trả về luôn để tiết kiệm
@@ -212,6 +231,7 @@ class SalesforceExporter:
             # Ném lỗi để endpoint có thể xử lý
             raise Exception(f"Lỗi khi lấy dữ liệu (SOQL có thể sai): {e}")
     
+    # CẬP NHẬT: transform_data (Bỏ các bộ lọc dư thừa)
     def transform_data(self, df):
         """Chuyển đổi dữ liệu (Giữ nguyên)"""
         df_export = pd.DataFrame()
@@ -246,12 +266,12 @@ class SalesforceExporter:
         df_export['Contract Name'] = df['Contract_Name']
         df_export['Created Date (C)'] = df['Created_Date'].dt.strftime('%d/%m/%Y')
         
-        df_export = df_export[
-            (df_export['YEAR'] >= 2015) & 
-            (df_export['YEAR'] <= datetime.now().year)
-        ]
-        
-        df_export = df_export.dropna(subset=['Account Name: Account Code'])
+        # XÓA CÁC BỘ LỌC NÀY (vì đã chuyển vào SOQL)
+        # df_export = df_export[
+        #     (df_export['YEAR'] >= 2015) & 
+        #     (df_export['YEAR'] <= datetime.now().year)
+        # ]
+        # df_export = df_export.dropna(subset=['Account Name: Account Code'])
         
         df_export = df_export.sort_values(
             by=['Account Name: Account Code', 'YEAR'],
@@ -274,8 +294,8 @@ async def root():
         "status": "ok",
         "message": "Salesforce Contract Products API (Hỗ trợ phân trang thông minh)",
         "endpoints": {
-            "all_products (GET)": "/api/contract-products?limit=100&offset=0",
-            "by_account (GET)": "/api/contract-products/by-account?account_code=XXX&limit=100&offset=0",
+            "all_products (GET)": "/api/contract-products?limit=200&offset=0",
+            "by_account (GET)": "/api/contract-products/by-account?account_code=XXX&limit=200&offset=0",
             "count_all (GET)": "/api/contract-products/count", # <-- MỚI
             "count_by_account (GET)": "/api/contract-products/count/by-account?account_code=XXX" # <-- MỚI
         }
@@ -285,7 +305,7 @@ async def root():
 # CẬP NHẬT: Endpoint này giờ trả về metadata
 @app.get("/api/contract-products")
 async def get_all_contract_product_details(
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0)
 ):
     """
@@ -296,6 +316,7 @@ async def get_all_contract_product_details(
         exporter = SalesforceExporter(**SALESFORCE_CONFIG)
         exporter.connect()
         
+        # filters=None sẽ chỉ dùng các filter cứng
         df_raw, total_records = exporter.fetch_data(limit=limit, offset=offset, filters=None)
         
         metadata = {
@@ -344,7 +365,7 @@ async def get_all_contract_product_details(
 @app.get("/api/contract-products/by-account")
 async def get_contract_details_by_account(
     account_code: str = Query(..., description="Account code to filter by"),
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0)
 ):
     """
@@ -358,6 +379,7 @@ async def get_contract_details_by_account(
         exporter = SalesforceExporter(**SALESFORCE_CONFIG)
         exporter.connect()
         
+        # Filter động
         account_filter = [
             FilterCondition(
                 field="Contract__r.Account__r.Account_Code__c",
@@ -366,6 +388,7 @@ async def get_contract_details_by_account(
             )
         ]
         
+        # Hàm fetch_data sẽ tự động kết hợp account_filter với các filter cứng
         df_raw, total_records = exporter.fetch_data(
             limit=limit, 
             offset=offset, 
@@ -422,18 +445,19 @@ async def get_contract_details_by_account(
 @app.get("/api/contract-products/count")
 async def count_all_contract_products():
     """
-    CHỈ ĐẾM tổng số record, không lọc.
+    CHỈ ĐẾM tổng số record, không lọc (chỉ dùng filter cứng).
     """
     try:
         exporter = SalesforceExporter(**SALESFORCE_CONFIG)
         exporter.connect()
         
+        # filters=None sẽ chỉ dùng các filter cứng
         total_records = exporter.get_count_only(filters=None)
         
         return {
             "success": True,
             "total_records": total_records,
-            "filters_applied": []
+            "filters_applied": "Hardcoded filters (Year >= 2015, Account Code != NULL)"
         }
 
     except HTTPException as http_e:
@@ -446,7 +470,7 @@ async def count_contract_details_by_account(
     account_code: str = Query(..., description="Account code to filter by"),
 ):
     """
-    CHỈ ĐẾM tổng số record, lọc theo Account Code.
+    CHỈ ĐẾM tổng số record, lọc theo Account Code (và filter cứng).
     """
     try:
         if not account_code or not account_code.strip():
@@ -463,6 +487,7 @@ async def count_contract_details_by_account(
             )
         ]
         
+        # Hàm get_count_only sẽ tự động kết hợp account_filter với các filter cứng
         total_records = exporter.get_count_only(filters=account_filter)
         
         return {
