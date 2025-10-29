@@ -1,9 +1,9 @@
 """
 FastAPI Backend - Trích xuất dữ liệu từ Salesforce
-Đã cập nhật để hỗ trợ Phân Trang (Pagination)
+Đã cập nhật để hỗ trợ Phân Trang (Pagination) VÀ Lọc Động (Dynamic Filtering)
 """
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 from simple_salesforce import Salesforce
@@ -12,11 +12,15 @@ import warnings
 import os
 import numpy as np
 
+# MỚI: Thêm Pydantic và các kiểu dữ liệu
+from pydantic import BaseModel
+from typing import List, Optional, Literal
+
 warnings.filterwarnings('ignore')
 
 app = FastAPI(title="Salesforce Contract Products API")
 
-# CORS middleware
+# CORS middleware (Giữ nguyên)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,13 +29,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Cấu hình Salesforce từ environment variables
+# Cấu hình Salesforce (Giữ nguyên)
 SALESFORCE_CONFIG = {
     'username': os.getenv('SALESFORCE_USERNAME'),
     'password': os.getenv('SALESFORCE_PASSWORD'),
     'security_token': os.getenv('SALESFORCE_SECURITY_TOKEN')
 }
 
+# =================================================================
+# MỚI: Định nghĩa Model cho Request Lọc Động
+# =================================================================
+
+class FilterCondition(BaseModel):
+    """Định nghĩa một điều kiện lọc đơn lẻ"""
+    field: str  # Tên trường SOQL, ví dụ: 'Segment__c' hoặc 'Product__r.Family'
+    operator: Literal["=", "!=", ">", "<", ">=", "<=", "LIKE"] = "="
+    value: str | int | float | bool | None # Giá trị để so sánh
+
+class FilterRequest(BaseModel):
+    """
+    Định nghĩa body cho request lọc.
+    Sử dụng Body(...) thay vì Query(...) cho các tham số POST.
+    """
+    filters: List[FilterCondition] = []
+    limit: int = Body(100, ge=1, le=500)
+    offset: int = Body(0, ge=0)
+
+
+# =================================================================
+# THAY ĐỔI: Cập nhật Lớp SalesforceExporter
+# =================================================================
 
 class SalesforceExporter:
     """Lớp kết nối và xuất dữ liệu từ Salesforce"""
@@ -43,7 +70,7 @@ class SalesforceExporter:
         self.sf = None
         
     def connect(self):
-        """Kết nối tới Salesforce"""
+        """Kết nối tới Salesforce (Giữ nguyên)"""
         try:
             self.sf = Salesforce(
                 username=self.username,
@@ -52,27 +79,45 @@ class SalesforceExporter:
             )
             return True
         except Exception as e:
-            # Ném lỗi cụ thể hơn để FastAPI có thể bắt
             raise HTTPException(status_code=503, detail=f"Lỗi kết nối Salesforce: {e}")
     
-    # THAY ĐỔI: Thêm limit, offset, và account_code làm tham số
-    def fetch_data(self, limit: int = 100, offset: int = 0, account_code: str = None):
-        """Lấy dữ liệu từ Salesforce với phân trang và bộ lọc"""
+    # THAY ĐỔI: 'fetch_data' đã được tổng quát hóa
+    # Bỏ 'account_code' và thay bằng 'filters'
+    def fetch_data(self, limit: int = 100, offset: int = 0, filters: Optional[List[FilterCondition]] = None):
+        """Lấy dữ liệu từ Salesforce với phân trang và bộ lọc ĐỘNG"""
         
-        # Xây dựng mệnh đề WHERE một cách an toàn
         where_clauses = []
-        if account_code:
-            # Bảo mật: Chuẩn hóa và thoát ký tự đặc biệt để tránh SOQL Injection
-            sanitized_code = account_code.strip().replace("'", "\\'")
-            if sanitized_code: # Đảm bảo không phải là chuỗi rỗng
-                where_clauses.append(f"Contract__r.Account__r.Account_Code__c = '{sanitized_code}'")
+        
+        # Xây dựng mệnh đề WHERE một cách an toàn từ danh sách filters
+        if filters:
+            for f in filters:
+                # 1. Kiểm tra toán tử hợp lệ (Pydantic đã làm nhưng kiểm tra lại)
+                if f.operator not in ["=", "!=", ">", "<", ">=", "<=", "LIKE"]:
+                    raise ValueError(f"Toán tử không hợp lệ: {f.operator}")
+
+                # 2. Xử lý và chuẩn hóa giá trị
+                sanitized_value = ""
+                if f.value is None:
+                    sanitized_value = "NULL"
+                elif isinstance(f.value, str):
+                    # Cực kỳ quan trọng: Thoát ký tự ' để chống SOQL Injection
+                    sanitized_value = f"'{f.value.strip().replace("'", "\\'")}'"
+                elif isinstance(f.value, (int, float)):
+                    sanitized_value = str(f.value)
+                elif isinstance(f.value, bool):
+                    sanitized_value = "TRUE" if f.value else "FALSE"
+                
+                # Thêm vào mệnh đề where
+                # Giả định f.field là an toàn (không do người dùng cuối nhập trực tiếp)
+                if sanitized_value:
+                    where_clauses.append(f"{f.field} {f.operator} {sanitized_value}")
 
         # Ghép các mệnh đề WHERE (nếu có)
         where_statement = ""
         if where_clauses:
             where_statement = "WHERE " + " AND ".join(where_clauses)
 
-        # Xây dựng truy vấn SOQL động
+        # Xây dựng truy vấn SOQL động (Query giữ nguyên)
         soql = f"""
          SELECT Name, 
            Contract__r.Account__r.Account_Code__c, 
@@ -109,6 +154,7 @@ class SalesforceExporter:
             if not records:
                 return None
             
+            # Xử lý DataFrame (Giữ nguyên)
             df = pd.json_normalize(records, sep='.')
             df = df.drop([col for col in df.columns if 'attributes' in col], axis=1)
             
@@ -120,10 +166,10 @@ class SalesforceExporter:
             
         except Exception as e:
             # Ném lỗi để endpoint có thể xử lý
-            raise Exception(f"Lỗi khi lấy dữ liệu: {e}")
+            raise Exception(f"Lỗi khi lấy dữ liệu (SOQL có thể sai): {e}")
     
     def transform_data(self, df):
-        """Chuyển đổi dữ liệu (Không thay đổi)"""
+        """Chuyển đổi dữ liệu (Giữ nguyên)"""
         df_export = pd.DataFrame()
         
         df_export['Account Name: Account Code'] = df['Contract_Account_Account_Code__c']
@@ -173,23 +219,28 @@ class SalesforceExporter:
         return df_export
 
 
+# =================================================================
+# CẬP NHẬT CÁC ENDPOINTS
+# =================================================================
+
 @app.get("/")
 async def root():
-    """Health check"""
+    """Health check (Cập nhật để hiển thị endpoint mới)"""
     return {
         "status": "ok",
-        "message": "Salesforce Contract Products API (Hỗ trợ phân trang)",
+        "message": "Salesforce Contract Products API (Hỗ trợ phân trang và lọc động)",
         "endpoints": {
-            "all_products": "/api/contract-products?limit=100&offset=0",
-            "by_account": "/api/contract-products/by-account?account_code=XXX&limit=100&offset=0"
+            "all_products (GET)": "/api/contract-products?limit=100&offset=0",
+            "by_account (GET)": "/api/contract-products/by-account?account_code=XXX&limit=100&offset=0",
+            "dynamic_filter (POST)": "/api/contract-products/filter"
         }
     }
 
 
-# THAY ĐỔI: Thêm tham số 'limit' và 'offset'
+# THAY ĐỔI: Endpoint này giờ gọi fetch_data mà không có bộ lọc
 @app.get("/api/contract-products")
 async def get_all_contract_product_details(
-    limit: int = Query(100, ge=1, le=500), # Giới hạn 100, tối đa 500
+    limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0)
 ):
     """
@@ -199,8 +250,8 @@ async def get_all_contract_product_details(
         exporter = SalesforceExporter(**SALESFORCE_CONFIG)
         exporter.connect()
         
-        # THAY ĐỔI: Truyền limit và offset vào
-        df_raw = exporter.fetch_data(limit=limit, offset=offset)
+        # THAY ĐỔI: Gọi fetch_data với filters=None
+        df_raw = exporter.fetch_data(limit=limit, offset=offset, filters=None)
         
         if df_raw is None or len(df_raw) == 0:
             return {
@@ -232,17 +283,16 @@ async def get_all_contract_product_details(
         }
         
     except HTTPException as http_e:
-        # Bắt lỗi từ hàm connect
         return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
     except Exception as e:
         return {"success": False, "error": f"Error processing data: {str(e)}"}
 
 
-# THAY ĐỔI: Thêm tham số 'limit' và 'offset'
+# THAY ĐỔI: Endpoint này giờ tạo một đối tượng FilterCondition
 @app.get("/api/contract-products/by-account")
 async def get_contract_details_by_account(
-    account_code: str = Query(..., description="Account code to filter by (case-insensitive)"),
-    limit: int = Query(100, ge=1, le=500), # Giới hạn 100, tối đa 500
+    account_code: str = Query(..., description="Account code to filter by"),
+    limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0)
 ):
     """
@@ -255,14 +305,22 @@ async def get_contract_details_by_account(
         exporter = SalesforceExporter(**SALESFORCE_CONFIG)
         exporter.connect()
         
-        # THAY ĐỔI: Truyền account_code, limit, offset vào fetch_data
-        # Bộ lọc giờ được thực hiện ở cấp độ SOQL
+        # THAY ĐỔI: Tạo một bộ lọc động
+        account_filter = [
+            FilterCondition(
+                field="Contract__r.Account__r.Account_Code__c",
+                operator="=",
+                value=account_code
+            )
+        ]
+        
         df_raw = exporter.fetch_data(
             limit=limit, 
             offset=offset, 
-            account_code=account_code
+            filters=account_filter  # Truyền bộ lọc vào
         )
         
+        # Logic xử lý kết quả (Giữ nguyên)
         if df_raw is None or len(df_raw) == 0:
             return {
                 "success": True,
@@ -281,11 +339,7 @@ async def get_contract_details_by_account(
                 "message": f"No data found (after transform) for account code '{account_code}' on this page"
             }
         
-        # XÓA BỎ: Không cần lọc bằng pandas nữa
-        # account_code_clean = account_code.strip().lower()
-        # filtered_df = df_export[...]
-        
-        df_json = df_export.replace({np.nan: None}) # Dùng df_export trực tiếp
+        df_json = df_export.replace({np.nan: None})
         records = df_json.to_dict(orient='records')
         
         return {
@@ -298,12 +352,75 @@ async def get_contract_details_by_account(
         }
 
     except HTTPException as http_e:
-        # Bắt lỗi từ hàm connect
         return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
     except Exception as e:
         return {"success": False, "error": f"Error processing data for account {account_code}: {str(e)}"}
 
 
+# =================================================================
+# MỚI: Endpoint Lọc Động (Tool mới)
+# =================================================================
+
+@app.post("/api/contract-products/filter")
+async def get_contract_products_by_dynamic_filter(request: FilterRequest):
+    """
+    Lấy dữ liệu chi tiết sản phẩm hợp đồng (THEO TRANG), 
+    lọc theo NHIỀU điều kiện động được gửi trong body.
+    """
+    try:
+        exporter = SalesforceExporter(**SALESFORCE_CONFIG)
+        exporter.connect()
+        
+        # Gọi fetch_data với các bộ lọc, limit, offset từ body
+        df_raw = exporter.fetch_data(
+            limit=request.limit, 
+            offset=request.offset, 
+            filters=request.filters
+        )
+        
+        if df_raw is None or len(df_raw) == 0:
+            return {
+                "success": True,
+                "count": 0, "limit": request.limit, "offset": request.offset,
+                "data": [],
+                "message": "No contract products found for the specified filters on this page",
+                "filters_applied": request.filters
+            }
+        
+        df_export = exporter.transform_data(df_raw)
+        
+        if df_export is None or len(df_export) == 0:
+            return {
+                "success": True,
+                "count": 0, "limit": request.limit, "offset": request.offset,
+                "data": [],
+                "message": "No contract products found after transformation for this page",
+                "filters_applied": request.filters
+            }
+        
+        df_json = df_export.replace({np.nan: None})
+        records = df_json.to_dict(orient='records')
+        
+        return {
+            "success": True,
+            "count": len(records),
+            "limit": request.limit,
+            "offset": request.offset,
+            "data": records,
+            "filters_applied": request.filters
+        }
+        
+    except HTTPException as http_e:
+        return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
+    except Exception as e:
+        return {"success": False, "error": f"Error processing data with filters: {str(e)}"}
+
+
+# =================================================================
+
 if __name__ == "__main__":
     import uvicorn
+    # Bạn cần set các biến môi trường (environment variables)
+    # SALESFORCE_USERNAME, SALESFORCE_PASSWORD, SALESFORCE_SECURITY_TOKEN
+    # trước khi chạy
     uvicorn.run(app, host="0.0.0.0", port=8000)
