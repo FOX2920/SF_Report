@@ -1,7 +1,8 @@
 """
 FastAPI Backend - Trích xuất dữ liệu từ Salesforce
 Đã cập nhật để hỗ trợ Phân Trang Thông Minh (Smart Pagination) 
-cho Custom GPT bằng cách trả về `total_records`.
+cho Custom GPT bằng cách trả về `total_records` VÀ
+thêm endpoint /count riêng biệt.
 """
 
 from fastapi import FastAPI, Query, HTTPException, Body
@@ -19,7 +20,7 @@ from typing import List, Optional, Literal
 
 warnings.filterwarnings('ignore')
 
-app = FastAPI(title="Salesforce Contract Products API (Smart Pagination)")
+app = FastAPI(title="Salesforce Contract Products API (Smart Pagination + Count)")
 
 # CORS middleware (Giữ nguyên)
 app.add_middleware(
@@ -81,17 +82,14 @@ class SalesforceExporter:
             return True
         except Exception as e:
             raise HTTPException(status_code=503, detail=f"Lỗi kết nối Salesforce: {e}")
-    
-    # THAY ĐỔI: 'fetch_data' trả về (dataframe, total_records)
-    def fetch_data(self, limit: int = 200, offset: int = 0, filters: Optional[List[FilterCondition]] = None):
-        """
-        Lấy dữ liệu từ Salesforce VÀ ĐẾM tổng số record.
-        Trả về: (DataFrame, total_records)
-        """
-        
+
+    # =================================================================
+    # MỚI: Helper Function để tránh lặp code xây dựng WHERE
+    # =================================================================
+    def _build_where_clause(self, filters: Optional[List[FilterCondition]] = None) -> str:
+        """Xây dựng mệnh đề WHERE từ danh sách filter. Trả về string (có thể rỗng)"""
         where_clauses = []
         
-        # Xây dựng mệnh đề WHERE một cách an toàn từ danh sách filters (Giữ nguyên)
         if filters:
             for f in filters:
                 if f.operator not in ["=", "!=", ">", "<", ">=", "<=", "LIKE"]:
@@ -110,31 +108,59 @@ class SalesforceExporter:
                 if sanitized_value:
                     where_clauses.append(f"{f.field} {f.operator} {sanitized_value}")
 
-        # Ghép các mệnh đề WHERE (nếu có)
-        where_statement = ""
         if where_clauses:
-            where_statement = "WHERE " + " AND ".join(where_clauses)
+            return "WHERE " + " AND ".join(where_clauses)
+        
+        return "" # Trả về rỗng nếu không có filter
 
-        # ================================================
-        # MỚI: Truy vấn COUNT() để lấy tổng số record
-        # ================================================
-        total_records = 0
+    # =================================================================
+    # MỚI: Hàm chỉ để đếm (theo yêu cầu)
+    # =================================================================
+    def get_count_only(self, filters: Optional[List[FilterCondition]] = None):
+        """Chỉ chạy truy vấn COUNT() dựa trên bộ lọc."""
+        
+        # Sử dụng helper
+        where_statement = self._build_where_clause(filters)
+        
         try:
             # Dùng COUNT(Id) nhanh hơn COUNT()
             count_soql = f"SELECT COUNT(Id) FROM Contract_Product__c {where_statement}"
             # Dùng .query() cho các truy vấn tổng hợp (aggregate)
             count_result = self.sf.query(count_soql) 
-            total_records = count_result['totalSize']
+            return count_result['totalSize']
+        except Exception as e:
+            raise Exception(f"Lỗi khi đếm record (COUNT query): {e}")
+
+    # =================================================================
+    # CẬP NHẬT: 'fetch_data' giờ dùng _build_where_clause
+    # =================================================================
+    def fetch_data(self, limit: int = 200, offset: int = 0, filters: Optional[List[FilterCondition]] = None):
+        """
+        Lấy dữ liệu từ Salesforce VÀ ĐẾM tổng số record.
+        Trả về: (DataFrame, total_records)
+        """
+        
+        # Dùng helper mới
+        where_statement = self._build_where_clause(filters)
+
+        # ================================================
+        # BƯỚC 1: Truy vấn COUNT()
+        # ================================================
+        total_records = 0
+        try:
+            # Gọi hàm count đã có sẵn trong class
+            total_records = self.get_count_only(filters)
             
             # Nếu không có record nào, trả về luôn để tiết kiệm
             if total_records == 0:
                 return None, 0
                 
         except Exception as e:
-            raise Exception(f"Lỗi khi đếm record (COUNT query): {e}")
+            # Ném lỗi nếu hàm count thất bại
+            raise e
         # ================================================
 
-        # Xây dựng truy vấn SOQL động (Query giữ nguyên)
+        # BƯỚC 2: Xây dựng truy vấn SOQL động để lấy dữ liệu
         soql = f"""
           SELECT Name, 
             Contract__r.Account__r.Account_Code__c, 
@@ -180,7 +206,7 @@ class SalesforceExporter:
             df.columns = df.columns.str.replace('Product__r.', 'Product_', regex=False)
             df.columns = df.columns.str.replace('Account__r.', 'Account_', regex=False)
             
-            return df, total_records # <-- THAY ĐỔI: Trả về cả hai
+            return df, total_records # <-- Trả về cả hai
             
         except Exception as e:
             # Ném lỗi để endpoint có thể xử lý
@@ -250,7 +276,8 @@ async def root():
         "endpoints": {
             "all_products (GET)": "/api/contract-products?limit=200&offset=0",
             "by_account (GET)": "/api/contract-products/by-account?account_code=XXX&limit=200&offset=0",
-            "dynamic_filter (POST)": "/api/contract-products/filter"
+            "dynamic_filter (POST)": "/api/contract-products/filter",
+            "dynamic_count (POST)": "/api/contract-products/count" # <-- MỚI
         }
     }
 
@@ -269,22 +296,19 @@ async def get_all_contract_product_details(
         exporter = SalesforceExporter(**SALESFORCE_CONFIG)
         exporter.connect()
         
-        # THAY ĐỔI: Nhận 2 giá trị
         df_raw, total_records = exporter.fetch_data(limit=limit, offset=offset, filters=None)
         
-        # --- Xây dựng metadata block ---
         metadata = {
             "total_records": total_records,
             "limit": limit,
             "offset": offset,
             "returned_records": 0
         }
-        # ---------------------------------
         
         if df_raw is None or len(df_raw) == 0:
             return {
                 "success": True,
-                "metadata": metadata, # Trả về metadata
+                "metadata": metadata, 
                 "data": [],
                 "message": "No contract products found for this page"
             }
@@ -294,7 +318,7 @@ async def get_all_contract_product_details(
         if df_export is None or len(df_export) == 0:
             return {
                 "success": True,
-                "metadata": metadata, # Trả về metadata
+                "metadata": metadata, 
                 "data": [],
                 "message": "No contract products found after transformation for this page"
             }
@@ -302,11 +326,11 @@ async def get_all_contract_product_details(
         df_json = df_export.replace({np.nan: None})
         records = df_json.to_dict(orient='records')
         
-        metadata["returned_records"] = len(records) # Cập nhật số record trả về
+        metadata["returned_records"] = len(records) 
         
         return {
             "success": True,
-            "metadata": metadata, # Trả về metadata
+            "metadata": metadata, 
             "data": records
         }
         
@@ -334,7 +358,6 @@ async def get_contract_details_by_account(
         exporter = SalesforceExporter(**SALESFORCE_CONFIG)
         exporter.connect()
         
-        # THAY ĐỔI: Tạo một bộ lọc động
         account_filter = [
             FilterCondition(
                 field="Contract__r.Account__r.Account_Code__c",
@@ -343,21 +366,18 @@ async def get_contract_details_by_account(
             )
         ]
         
-        # THAY ĐỔI: Nhận 2 giá trị
         df_raw, total_records = exporter.fetch_data(
             limit=limit, 
             offset=offset, 
-            filters=account_filter  # Truyền bộ lọc vào
+            filters=account_filter 
         )
         
-        # --- Xây dựng metadata block ---
         metadata = {
             "total_records": total_records,
             "limit": limit,
             "offset": offset,
             "returned_records": 0
         }
-        # ---------------------------------
         
         if df_raw is None or len(df_raw) == 0:
             return {
@@ -380,7 +400,7 @@ async def get_contract_details_by_account(
         df_json = df_export.replace({np.nan: None})
         records = df_json.to_dict(orient='records')
         
-        metadata["returned_records"] = len(records) # Cập nhật
+        metadata["returned_records"] = len(records) 
         
         return {
             "success": True,
@@ -396,7 +416,7 @@ async def get_contract_details_by_account(
 
 
 # =================================================================
-# CẬP NHẬT: Endpoint Lọc Động (Tool mới)
+# CẬP NHẬT: Endpoint Lọc Động (Giữ nguyên)
 # =================================================================
 
 @app.post("/api/contract-products/filter")
@@ -409,26 +429,23 @@ async def get_contract_products_by_dynamic_filter(request: FilterRequest):
         exporter = SalesforceExporter(**SALESFORCE_CONFIG)
         exporter.connect()
         
-        # === THAY ĐỔI: Nhận 2 giá trị trả về ===
         df_raw, total_records = exporter.fetch_data(
             limit=request.limit, 
             offset=request.offset, 
             filters=request.filters
         )
         
-        # --- Xây dựng metadata block ---
         metadata = {
             "total_records": total_records,
             "limit": request.limit,
             "offset": request.offset,
-            "returned_records": 0 # Sẽ cập nhật sau
+            "returned_records": 0 
         }
-        # ---------------------------------
         
         if df_raw is None or len(df_raw) == 0:
             return {
                 "success": True,
-                "metadata": metadata, # Trả về metadata
+                "metadata": metadata, 
                 "data": [],
                 "message": "No contract products found for the specified filters on this page",
                 "filters_applied": request.filters
@@ -439,7 +456,7 @@ async def get_contract_products_by_dynamic_filter(request: FilterRequest):
         if df_export is None or len(df_export) == 0:
             return {
                 "success": True,
-                "metadata": metadata, # Trả về metadata
+                "metadata": metadata, 
                 "data": [],
                 "message": "No contract products found after transformation for this page",
                 "filters_applied": request.filters
@@ -448,12 +465,11 @@ async def get_contract_products_by_dynamic_filter(request: FilterRequest):
         df_json = df_export.replace({np.nan: None})
         records = df_json.to_dict(orient='records')
         
-        # Cập nhật số record thực tế trả về
         metadata["returned_records"] = len(records)
         
         return {
             "success": True,
-            "metadata": metadata, # <-- THÔNG TIN QUAN TRỌNG NHẤT
+            "metadata": metadata, 
             "data": records,
             "filters_applied": request.filters
         }
@@ -462,6 +478,36 @@ async def get_contract_products_by_dynamic_filter(request: FilterRequest):
         return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
     except Exception as e:
         return {"success": False, "error": f"Error processing data with filters: {str(e)}"}
+
+
+# =================================================================
+# MỚI: Endpoint CHỈ ĐẾM (theo yêu cầu)
+# =================================================================
+
+@app.post("/api/contract-products/count")
+async def count_contract_products_by_dynamic_filter(request: FilterRequest):
+    """
+    CHỈ ĐẾM tổng số record, dựa trên các điều kiện lọc động.
+    Không trả về dữ liệu, siêu nhanh.
+    """
+    try:
+        exporter = SalesforceExporter(**SALESFORCE_CONFIG)
+        exporter.connect()
+        
+        # Gọi hàm get_count_only mới, chỉ truyền vào bộ lọc
+        # Bỏ qua limit và offset từ request body
+        total_records = exporter.get_count_only(filters=request.filters)
+        
+        return {
+            "success": True,
+            "total_records": total_records,
+            "filters_applied": request.filters
+        }
+        
+    except HTTPException as http_e:
+        return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
+    except Exception as e:
+        return {"success": False, "error": f"Error counting data with filters: {str(e)}"}
 
 
 # =================================================================
