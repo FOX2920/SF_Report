@@ -53,7 +53,7 @@ class FilterRequest(BaseModel):
     Sử dụng Body(...) thay vì Query(...) cho các tham số POST.
     """
     filters: List[FilterCondition] = []
-    limit: int = Body(100, ge=1, le=500)
+    limit: int = Body(200, ge=1, le=500)
     offset: int = Body(0, ge=0)
 
 
@@ -83,7 +83,7 @@ class SalesforceExporter:
             raise HTTPException(status_code=503, detail=f"Lỗi kết nối Salesforce: {e}")
     
     # THAY ĐỔI: 'fetch_data' trả về (dataframe, total_records)
-    def fetch_data(self, limit: int = 100, offset: int = 0, filters: Optional[List[FilterCondition]] = None):
+    def fetch_data(self, limit: int = 200, offset: int = 0, filters: Optional[List[FilterCondition]] = None):
         """
         Lấy dữ liệu từ Salesforce VÀ ĐẾM tổng số record.
         Trả về: (DataFrame, total_records)
@@ -248,8 +248,8 @@ async def root():
         "status": "ok",
         "message": "Salesforce Contract Products API (Hỗ trợ phân trang thông minh & lọc động)",
         "endpoints": {
-            "all_products (GET)": "/api/contract-products?limit=100&offset=0",
-            "by_account (GET)": "/api/contract-products/by-account?account_code=XXX&limit=100&offset=0",
+            "all_products (GET)": "/api/contract-products?limit=200&offset=0",
+            "by_account (GET)": "/api/contract-products/by-account?account_code=XXX&limit=200&offset=0",
             "dynamic_filter (POST)": "/api/contract-products/filter"
         }
     }
@@ -258,7 +258,7 @@ async def root():
 # CẬP NHẬT: Endpoint này giờ trả về metadata
 @app.get("/api/contract-products")
 async def get_all_contract_product_details(
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0)
 ):
     """
@@ -320,7 +320,7 @@ async def get_all_contract_product_details(
 @app.get("/api/contract-products/by-account")
 async def get_contract_details_by_account(
     account_code: str = Query(..., description="Account code to filter by"),
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0)
 ):
     """
