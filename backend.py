@@ -291,6 +291,10 @@ async def root():
             "by_year": "/api/contract-products/by-year/{year}",
             "by_segment": "/api/contract-products/by-segment/{segment}",
             "by_family": "/api/contract-products/by-family/{family}",
+            "account_by_segment": "/api/contract-products/by-account/{account_code}/by-segment/{segment}",
+            "account_by_year": "/api/contract-products/by-account/{account_code}/by-year/{year}",
+            "account_by_family": "/api/contract-products/by-account/{account_code}/by-family/{family}",
+            "account_by_stone_color": "/api/contract-products/by-account/{account_code}/by-stone-color/{stone_color}",
             "count_all": "/api/contract-products/count",
             "count_by_account": "/api/contract-products/count/by-account?account_code=XXX"
         }
@@ -470,6 +474,187 @@ async def get_contract_details_by_family(family: str):
         return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
     except Exception as e:
         return {"success": False, "error": f"Error processing data for product family {family}: {str(e)}"}
+
+
+# =================================================================
+# CÁC ENDPOINT KẾT HỢP ACCOUNT CODE VỚI CÁC TIÊU CHÍ KHÁC
+# =================================================================
+
+# Endpoint lọc theo Account Code + Segment (tối đa 100 record)
+@app.get("/api/contract-products/by-account/{account_code}/by-segment/{segment}")
+async def get_contract_details_by_account_and_segment(account_code: str, segment: str):
+    """
+    Lấy dữ liệu chi tiết sản phẩm hợp đồng, lọc theo Account Code và Segment.
+    Giới hạn tối đa 100 record để tránh lỗi responseTooLarge.
+    """
+    try:
+        if not account_code or not account_code.strip():
+            return {"success": False, "error": "Account code cannot be empty"}
+        if not segment or not segment.strip():
+            return {"success": False, "error": "Segment cannot be empty"}
+        
+        exporter = SalesforceExporter(**SALESFORCE_CONFIG)
+        exporter.connect()
+        
+        filters = [
+            FilterCondition(
+                field="Contract__r.Account__r.Account_Code__c",
+                operator="=",
+                value=account_code
+            ),
+            FilterCondition(
+                field="Segment__c",
+                operator="=",
+                value=segment
+            )
+        ]
+        
+        df_raw, total_records = exporter.fetch_data(filters=filters, max_records=100)
+        
+        return _process_response(df_raw, total_records, exporter, {
+            "account_code": account_code,
+            "segment": segment
+        })
+        
+    except HTTPException as http_e:
+        return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
+    except Exception as e:
+        return {"success": False, "error": f"Error processing data for account {account_code} and segment {segment}: {str(e)}"}
+
+
+# Endpoint lọc theo Account Code + Year (tối đa 100 record)
+@app.get("/api/contract-products/by-account/{account_code}/by-year/{year}")
+async def get_contract_details_by_account_and_year(account_code: str, year: int):
+    """
+    Lấy dữ liệu chi tiết sản phẩm hợp đồng, lọc theo Account Code và Năm.
+    Giới hạn tối đa 100 record để tránh lỗi responseTooLarge.
+    """
+    try:
+        if not account_code or not account_code.strip():
+            return {"success": False, "error": "Account code cannot be empty"}
+        if year < 2015 or year > datetime.now().year:
+            return {"success": False, "error": f"Year must be between 2015 and {datetime.now().year}"}
+        
+        exporter = SalesforceExporter(**SALESFORCE_CONFIG)
+        exporter.connect()
+        
+        # Tạo filter cho năm cụ thể
+        year_start = f"{year}-01-01"
+        year_end = f"{year}-12-31"
+        
+        filters = [
+            FilterCondition(
+                field="Contract__r.Account__r.Account_Code__c",
+                operator="=",
+                value=account_code
+            ),
+            FilterCondition(
+                field="Contract__r.Created_Date__c",
+                operator=">=",
+                value=year_start
+            ),
+            FilterCondition(
+                field="Contract__r.Created_Date__c",
+                operator="<=",
+                value=year_end
+            )
+        ]
+        
+        df_raw, total_records = exporter.fetch_data(filters=filters, max_records=100)
+        
+        return _process_response(df_raw, total_records, exporter, {
+            "account_code": account_code,
+            "year": year
+        })
+        
+    except HTTPException as http_e:
+        return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
+    except Exception as e:
+        return {"success": False, "error": f"Error processing data for account {account_code} and year {year}: {str(e)}"}
+
+
+# Endpoint lọc theo Account Code + Product Family (tối đa 100 record)
+@app.get("/api/contract-products/by-account/{account_code}/by-family/{family}")
+async def get_contract_details_by_account_and_family(account_code: str, family: str):
+    """
+    Lấy dữ liệu chi tiết sản phẩm hợp đồng, lọc theo Account Code và Product Family.
+    Giới hạn tối đa 100 record để tránh lỗi responseTooLarge.
+    """
+    try:
+        if not account_code or not account_code.strip():
+            return {"success": False, "error": "Account code cannot be empty"}
+        if not family or not family.strip():
+            return {"success": False, "error": "Product Family cannot be empty"}
+        
+        exporter = SalesforceExporter(**SALESFORCE_CONFIG)
+        exporter.connect()
+        
+        filters = [
+            FilterCondition(
+                field="Contract__r.Account__r.Account_Code__c",
+                operator="=",
+                value=account_code
+            ),
+            FilterCondition(
+                field="Product__r.Family",
+                operator="=",
+                value=family
+            )
+        ]
+        
+        df_raw, total_records = exporter.fetch_data(filters=filters, max_records=100)
+        
+        return _process_response(df_raw, total_records, exporter, {
+            "account_code": account_code,
+            "product_family": family
+        })
+        
+    except HTTPException as http_e:
+        return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
+    except Exception as e:
+        return {"success": False, "error": f"Error processing data for account {account_code} and product family {family}: {str(e)}"}
+
+
+# Endpoint lọc theo Account Code + Stone Color Type (tối đa 100 record)
+@app.get("/api/contract-products/by-account/{account_code}/by-stone-color/{stone_color}")
+async def get_contract_details_by_account_and_stone_color(account_code: str, stone_color: str):
+    """
+    Lấy dữ liệu chi tiết sản phẩm hợp đồng, lọc theo Account Code và Stone Color Type.
+    Giới hạn tối đa 100 record để tránh lỗi responseTooLarge.
+    """
+    try:
+        if not account_code or not account_code.strip():
+            return {"success": False, "error": "Account code cannot be empty"}
+        if not stone_color or not stone_color.strip():
+            return {"success": False, "error": "Stone Color Type cannot be empty"}
+        
+        exporter = SalesforceExporter(**SALESFORCE_CONFIG)
+        exporter.connect()
+        
+        filters = [
+            FilterCondition(
+                field="Contract__r.Account__r.Account_Code__c",
+                operator="=",
+                value=account_code
+            ),
+            FilterCondition(
+                field="Product__r.STONE_Color_Type__c",
+                operator="=",
+                value=stone_color
+            )
+        ]
+        
+        df_raw, total_records = exporter.fetch_data(filters=filters, max_records=100)
+        
+        return _process_response(df_raw, total_records, exporter, {
+            "account_code": account_code,
+            "stone_color_type": stone_color
+        })
+        
+    except HTTPException as http_e:
+        return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
+    except Exception as e:
+        return {"success": False, "error": f"Error processing data for account {account_code} and stone color {stone_color}: {str(e)}"}
 
 
 # =================================================================
