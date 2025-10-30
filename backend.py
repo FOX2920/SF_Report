@@ -146,12 +146,13 @@ class SalesforceExporter:
             raise Exception(f"Lỗi khi đếm record (query for totalSize): {e}")
 
     # =================================================================
-    # 'fetch_data' dùng _build_where_clause
+    # 'fetch_data' dùng _build_where_clause - GIỚI HẠN 100 RECORD
     # =================================================================
-    def fetch_data(self, limit: int = 200, offset: int = 0, filters: Optional[List[FilterCondition]] = None):
+    def fetch_data(self, filters: Optional[List[FilterCondition]] = None, max_records: int = 100):
         """
         Lấy dữ liệu từ Salesforce VÀ ĐẾM tổng số record.
         Trả về: (DataFrame, total_records)
+        Giới hạn tối đa 100 record để tránh lỗi responseTooLarge trong ChatGPT.
         """
         
         # Dùng helper mới (đã bao gồm filter cứng)
@@ -176,6 +177,7 @@ class SalesforceExporter:
         # ================================================
 
         # BƯỚC 2: Xây dựng truy vấn SOQL động để lấy dữ liệu
+        # Giới hạn tối đa max_records (mặc định 100)
         soql = f"""
           SELECT Name, 
             Contract__r.Account__r.Account_Code__c, 
@@ -201,17 +203,16 @@ class SalesforceExporter:
           FROM Contract_Product__c 
           {where_statement}
           ORDER BY Contract__r.Created_Date__c DESC
-          LIMIT {limit}
-          OFFSET {offset}
+          LIMIT {max_records}
           """
         
         try:
-            # Dùng query_all() để lấy toàn bộ dữ liệu (đã giới hạn bởi LIMIT/OFFSET)
+            # Dùng query_all() để lấy toàn bộ dữ liệu (đã giới hạn bởi LIMIT)
             query_result = self.sf.query_all(soql)
             records = query_result['records']
             
             if not records:
-                # Không có data TRANG NÀY, nhưng vẫn trả về tổng số
+                # Không có data, nhưng vẫn trả về tổng số
                 return None, total_records
             
             # Xử lý DataFrame (Giữ nguyên)
@@ -281,88 +282,65 @@ class SalesforceExporter:
 
 @app.get("/")
 async def root():
-    """Health check (Cập nhật để hiển thị endpoint mới)"""
+    """Health check - Danh sách các endpoint"""
     return {
         "status": "ok",
-        "message": "Salesforce Contract Products API (Hỗ trợ phân trang thông minh)",
+        "message": "Salesforce Contract Products API (Giới hạn tối đa 100 record/endpoint)",
         "endpoints": {
-            "all_products (GET)": "/api/contract-products?limit=200&offset=0",
-            "by_account (GET)": "/api/contract-products/by-account?account_code=XXX&limit=200&offset=0",
-            "count_all (GET)": "/api/contract-products/count", # <-- MỚI
-            "count_by_account (GET)": "/api/contract-products/count/by-account?account_code=XXX" # <-- MỚI
+            "by_account": "/api/contract-products/by-account/{account_code}",
+            "by_year": "/api/contract-products/by-year/{year}",
+            "by_segment": "/api/contract-products/by-segment/{segment}",
+            "by_family": "/api/contract-products/by-family/{family}",
+            "count_all": "/api/contract-products/count",
+            "count_by_account": "/api/contract-products/count/by-account?account_code=XXX"
         }
     }
 
 
-# Endpoint này giờ trả về metadata
-@app.get("/api/contract-products")
-async def get_all_contract_product_details(
-    limit: int = Query(200, ge=1, le=500),
-    offset: int = Query(0, ge=0)
-):
-    """
-    Lấy dữ liệu chi tiết sản phẩm hợp đồng (THEO TRANG).
-    Trả về metadata phân trang.
-    """
-    try:
-        exporter = SalesforceExporter(**SALESFORCE_CONFIG)
-        exporter.connect()
-        
-        # filters=None sẽ chỉ dùng các filter cứng
-        df_raw, total_records = exporter.fetch_data(limit=limit, offset=offset, filters=None)
-        
-        metadata = {
-            "total_records": total_records,
-            "limit": limit,
-            "offset": offset,
-            "returned_records": 0
-        }
-        
-        if df_raw is None or len(df_raw) == 0:
-            return {
-                "success": True,
-                "metadata": metadata,  
-                "data": [],
-                "message": "No contract products found for this page"
-            }
-        
-        df_export = exporter.transform_data(df_raw)
-        
-        if df_export is None or len(df_export) == 0:
-            return {
-                "success": True,
-                "metadata": metadata,  
-                "data": [],
-                "message": "No contract products found after transformation for this page"
-            }
-        
-        df_json = df_export.replace({np.nan: None})
-        records = df_json.to_dict(orient='records')
-        
-        metadata["returned_records"] = len(records)  
-        
+# Helper function để xử lý response
+def _process_response(df_raw, total_records, exporter, filter_info=None):
+    """Helper function để xử lý và trả về response"""
+    if df_raw is None or len(df_raw) == 0:
         return {
             "success": True,
-            "metadata": metadata,  
-            "data": records
+            "total_records": total_records,
+            "returned_records": 0,
+            "data": [],
+            "message": "No contract products found",
+            **(filter_info or {})
         }
-        
-    except HTTPException as http_e:
-        return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
-    except Exception as e:
-        return {"success": False, "error": f"Error processing data: {str(e)}"}
+    
+    # Transform data
+    df_export = exporter.transform_data(df_raw)
+    
+    if df_export is None or len(df_export) == 0:
+        return {
+            "success": True,
+            "total_records": total_records,
+            "returned_records": 0,
+            "data": [],
+            "message": "No contract products found after transformation",
+            **(filter_info or {})
+        }
+    
+    df_json = df_export.replace({np.nan: None})
+    records = df_json.to_dict(orient='records')
+    
+    return {
+        "success": True,
+        "total_records": total_records,
+        "returned_records": len(records),
+        "data": records,
+        **(filter_info or {})
+    }
 
 
-# Endpoint này giờ trả về metadata
-@app.get("/api/contract-products/by-account")
-async def get_contract_details_by_account(
-    account_code: str = Query(..., description="Account code to filter by"),
-    limit: int = Query(200, ge=1, le=500),
-    offset: int = Query(0, ge=0)
-):
+# Endpoint lọc theo Account Code (tối đa 100 record)
+@app.get("/api/contract-products/by-account/{account_code}")
+async def get_contract_details_by_account(account_code: str):
     """
-    Lấy dữ liệu chi tiết sản phẩm hợp đồng (THEO TRANG), lọc theo Account Code.
-    Trả về metadata phân trang.
+    Lấy dữ liệu chi tiết sản phẩm hợp đồng, lọc theo Account Code.
+    Giới hạn tối đa 100 record để tránh lỗi responseTooLarge.
     """
     try:
         if not account_code or not account_code.strip():
@@ -371,7 +349,6 @@ async def get_contract_details_by_account(
         exporter = SalesforceExporter(**SALESFORCE_CONFIG)
         exporter.connect()
         
-        # Filter động
         account_filter = [
             FilterCondition(
                 field="Contract__r.Account__r.Account_Code__c",
@@ -380,54 +357,119 @@ async def get_contract_details_by_account(
             )
         ]
         
-        # Hàm fetch_data sẽ tự động kết hợp account_filter với các filter cứng
-        df_raw, total_records = exporter.fetch_data(
-            limit=limit,  
-            offset=offset,  
-            filters=account_filter  
-        )
+        df_raw, total_records = exporter.fetch_data(filters=account_filter, max_records=100)
         
-        metadata = {
-            "total_records": total_records,
-            "limit": limit,
-            "offset": offset,
-            "returned_records": 0
-        }
+        return _process_response(df_raw, total_records, exporter, {"account_code": account_code})
         
-        if df_raw is None or len(df_raw) == 0:
-            return {
-                "success": True,
-                "metadata": metadata,
-                "data": [], "account_code": account_code,
-                "message": f"No data found for account code '{account_code}' on this page"
-            }
-        
-        df_export = exporter.transform_data(df_raw)
-        
-        if df_export is None or len(df_export) == 0:
-            return {
-                "success": True,
-                "metadata": metadata,
-                "data": [], "account_code": account_code,
-                "message": f"No data found (after transform) for account code '{account_code}' on this page"
-            }
-        
-        df_json = df_export.replace({np.nan: None})
-        records = df_json.to_dict(orient='records')
-        
-        metadata["returned_records"] = len(records)  
-        
-        return {
-            "success": True,
-            "metadata": metadata,
-            "data": records,
-            "account_code": account_code
-        }
-
     except HTTPException as http_e:
         return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
     except Exception as e:
         return {"success": False, "error": f"Error processing data for account {account_code}: {str(e)}"}
+
+
+# Endpoint lọc theo Năm (tối đa 100 record)
+@app.get("/api/contract-products/by-year/{year}")
+async def get_contract_details_by_year(year: int):
+    """
+    Lấy dữ liệu chi tiết sản phẩm hợp đồng, lọc theo năm.
+    Giới hạn tối đa 100 record để tránh lỗi responseTooLarge.
+    """
+    try:
+        if year < 2015 or year > datetime.now().year:
+            return {"success": False, "error": f"Year must be between 2015 and {datetime.now().year}"}
+        
+        exporter = SalesforceExporter(**SALESFORCE_CONFIG)
+        exporter.connect()
+        
+        # Tạo filter cho năm cụ thể
+        year_start = f"{year}-01-01"
+        year_end = f"{year}-12-31"
+        
+        year_filter = [
+            FilterCondition(
+                field="Contract__r.Created_Date__c",
+                operator=">=",
+                value=year_start
+            ),
+            FilterCondition(
+                field="Contract__r.Created_Date__c",
+                operator="<=",
+                value=year_end
+            )
+        ]
+        
+        df_raw, total_records = exporter.fetch_data(filters=year_filter, max_records=100)
+        
+        return _process_response(df_raw, total_records, exporter, {"year": year})
+        
+    except HTTPException as http_e:
+        return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
+    except Exception as e:
+        return {"success": False, "error": f"Error processing data for year {year}: {str(e)}"}
+
+
+# Endpoint lọc theo Segment (tối đa 100 record)
+@app.get("/api/contract-products/by-segment/{segment}")
+async def get_contract_details_by_segment(segment: str):
+    """
+    Lấy dữ liệu chi tiết sản phẩm hợp đồng, lọc theo Segment.
+    Giới hạn tối đa 100 record để tránh lỗi responseTooLarge.
+    """
+    try:
+        if not segment or not segment.strip():
+            return {"success": False, "error": "Segment cannot be empty"}
+        
+        exporter = SalesforceExporter(**SALESFORCE_CONFIG)
+        exporter.connect()
+        
+        segment_filter = [
+            FilterCondition(
+                field="Segment__c",
+                operator="=",
+                value=segment
+            )
+        ]
+        
+        df_raw, total_records = exporter.fetch_data(filters=segment_filter, max_records=100)
+        
+        return _process_response(df_raw, total_records, exporter, {"segment": segment})
+        
+    except HTTPException as http_e:
+        return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
+    except Exception as e:
+        return {"success": False, "error": f"Error processing data for segment {segment}: {str(e)}"}
+
+
+# Endpoint lọc theo Product Family (tối đa 100 record)
+@app.get("/api/contract-products/by-family/{family}")
+async def get_contract_details_by_family(family: str):
+    """
+    Lấy dữ liệu chi tiết sản phẩm hợp đồng, lọc theo Product Family.
+    Giới hạn tối đa 100 record để tránh lỗi responseTooLarge.
+    """
+    try:
+        if not family or not family.strip():
+            return {"success": False, "error": "Product Family cannot be empty"}
+        
+        exporter = SalesforceExporter(**SALESFORCE_CONFIG)
+        exporter.connect()
+        
+        family_filter = [
+            FilterCondition(
+                field="Product__r.Family",
+                operator="=",
+                value=family
+            )
+        ]
+        
+        df_raw, total_records = exporter.fetch_data(filters=family_filter, max_records=100)
+        
+        return _process_response(df_raw, total_records, exporter, {"product_family": family})
+        
+    except HTTPException as http_e:
+        return {"success": False, "error": http_e.detail, "status_code": http_e.status_code}
+    except Exception as e:
+        return {"success": False, "error": f"Error processing data for product family {family}: {str(e)}"}
 
 
 # =================================================================
